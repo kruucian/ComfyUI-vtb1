@@ -31,12 +31,14 @@ Nodes
     - `callback_url`, `run_id`, `metadata_json`, `mode`
     - optional: `filename_prefix`, `image_format`
   - Sends the same artifact payload as `GX10ImageUpload` so you can wire it where `SaveImage` is usually used.
+  - 동시에 프리뷰 이미지(`ui.images`)를 출력해 ComfyUI 캔버스에 출력합니다.
 - `GX10SaveVideo`
   - Save-video style callback node (VHS output compatible).
   - Input:
     - `video` (string path / URI)
     - `callback_url`, `run_id`, `metadata_json`, `status`, `mode`
   - Sends `/callbacks/artifact`-compatible payload with `result_url`.
+  - 동시에 `ui.video`를 출력해 ComfyUI에서 미리보기 화면을 시도합니다.
 
 Files
 - `gx10_nodes.py`: node implementations.
@@ -45,14 +47,15 @@ Files
 How to install into ComfyUI
 1. Copy this folder into ComfyUI `custom_nodes/` (or mount it in Docker as you prefer).
 2. Restart ComfyUI.
-3. Use `GX10TextInput` and `GX10ImageUpload` in your workflow.
-4. Ensure `GX10ImageUpload` has:
-   - `images`
-   - `run_id`
-   - `callback_url`
-   - `metadata_json`
-   - `mode`
-   - `auth_header` (optional)
+3. Prefer `GX10TextInput` with `GX10SaveImage`/`GX10SaveVideo` at the end of the workflow.
+4. If legacy path is needed, use `GX10ImageUpload` for image callbacks.
+5. Ensure callback node has:
+  - `images`
+  - `run_id`
+  - `callback_url`
+  - `metadata_json`
+  - `mode`
+  - `auth_header` (optional)
 
 권장: 기존 `SaveImage`/VHS 노드 대신 `GX10SaveImage`, `GX10SaveVideo`를 사용하면 콜백 인터페이스를 통일하기 쉽습니다.
 
