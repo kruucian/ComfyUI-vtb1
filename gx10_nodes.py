@@ -5,6 +5,8 @@ import io
 import json
 import os
 import shutil
+import subprocess
+import tempfile
 from urllib.parse import urljoin, urlparse
 import urllib.error
 import urllib.request
@@ -100,6 +102,246 @@ def _to_tensor_from_file(path: str) -> torch.Tensor | None:
     if array.ndim != 3:
         return None
     return torch.from_numpy(array)[None, ...]
+
+
+def _coerce_video_frames(frames: object) -> List[torch.Tensor]:
+    if frames is None:
+        return []
+    if isinstance(frames, torch.Tensor):
+        if frames.ndim == 4:
+            return [torch.clamp(frame, 0.0, 1.0) for frame in frames]
+        if frames.ndim == 3:
+            return [torch.clamp(frames, 0.0, 1.0)]
+        return []
+    if isinstance(frames, (list, tuple)):
+        return [torch.clamp(torch.as_tensor(frame), 0.0, 1.0) for frame in frames if frame is not None]
+    return []
+
+
+def _normalize_frame_shape(frame: torch.Tensor) -> torch.Tensor:
+    if frame.ndim == 4 and frame.shape[0] == 1:
+        frame = frame[0]
+    if frame.ndim == 3 and frame.shape[0] in {1, 3, 4} and frame.shape[-1] not in {1, 3, 4}:
+        frame = frame.permute(1, 2, 0)
+    if frame.ndim == 2:
+        return torch.stack([frame, frame, frame], dim=-1)
+    if frame.ndim == 3 and frame.shape[-1] == 4:
+        return frame[:, :, :3]
+    if frame.ndim == 3 and frame.shape[-1] == 1:
+        return torch.cat([frame, frame, frame], dim=-1)
+    return frame
+
+
+def _apply_pingpong(frames: Sequence[torch.Tensor], pingpong: bool) -> List[torch.Tensor]:
+    if not pingpong:
+        return list(frames)
+    if len(frames) <= 2:
+        return list(frames)
+    return list(frames) + list(reversed(frames[1:-1]))
+
+
+def _build_video_from_frames(
+    frames: Sequence[torch.Tensor],
+    frame_rate: float = 8.0,
+    filename_prefix: str = "gx10_video",
+    audio: str = "",
+    save_output: bool = True,
+    loop_count: int = 0,
+    pingpong: bool = False,
+    format_value: str = "video/mp4",
+) -> str:
+    if not frames:
+        return ""
+    first_frame = _normalize_frame_shape(frames[0]).cpu()
+    width = int(first_frame.shape[1]) if first_frame.ndim >= 2 else 512
+    height = int(first_frame.shape[0]) if first_frame.ndim >= 2 else 512
+    if width <= 0 or height <= 0:
+        return ""
+
+    try:
+        output_dir = Path(
+            folder_paths.get_output_directory() if save_output else folder_paths.get_temp_directory()
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_dir_str = str(output_dir)
+        output_dir = Path(output_dir_str)
+        if not output_dir.exists():
+            output_dir.mkdir(parents=True, exist_ok=True)
+        prepared_frames = list(_apply_pingpong(frames, pingpong))
+        if not prepared_frames:
+            return ""
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        full_output_folder, filename, counter, _, _ = folder_paths.get_save_image_path(
+            filename_prefix,
+            output_dir_str,
+            width,
+            height,
+        )
+    except Exception:
+        return ""
+
+    format_value = str(format_value or "video/mp4").strip().lower()
+    ext_map = {
+        "video/mp4": "mp4",
+        "video/webm": "webm",
+        "video/mov": "mov",
+        "video/x-m4v": "m4v",
+        "video/avi": "avi",
+        "video/x-flv": "flv",
+        "video/x-matroska": "mkv",
+        "video/mkv": "mkv",
+        "video/x-mpegurl": "m3u8",
+        "image/gif": "gif",
+        "image/webp": "webp",
+    }
+    if format_value.startswith("video/") and format_value not in ext_map:
+        ext = format_value.split("/", 1)[1]
+    elif format_value.startswith("."):
+        ext = format_value.lstrip(".")
+    else:
+        ext = ext_map.get(format_value, "mp4")
+    if "." in ext:
+        ext = ext.lstrip(".")
+
+    output_file = os.path.join(full_output_folder, f"{filename}_{counter:05}.{ext}")
+    frames_dir = Path(tempfile.mkdtemp(prefix="gx10_save_video_frames_"))
+    frame_paths = []
+    try:
+        for idx, frame in enumerate(prepared_frames):
+            normalized = _normalize_frame_shape(frame)
+            normalized = torch.clamp(normalized, 0.0, 1.0)
+            array = (normalized.cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)
+            if array.ndim != 3 or array.shape[2] != 3:
+                return ""
+            image = Image.fromarray(array)
+            path = frames_dir / f"frame_{idx:08d}.png"
+            image.save(path)
+            frame_paths.append(str(path))
+
+        if ext == "gif":
+            duration_ms = int(1000 / max(1.0, float(frame_rate)))
+            first_img = Image.open(frame_paths[0])
+            frames = [Image.open(p) for p in frame_paths[1:]]
+            first_img.save(
+                output_file,
+                format="GIF",
+                save_all=True,
+                append_images=frames,
+                duration=duration_ms,
+                loop=loop_count,
+            )
+            for f in frames:
+                try:
+                    f.close()
+                except Exception:
+                    pass
+            return output_file
+
+        if ext == "webp":
+            duration_ms = int(1000 / max(1.0, float(frame_rate)))
+            first_img = Image.open(frame_paths[0])
+            frames = [Image.open(p) for p in frame_paths[1:]]
+            first_img.save(
+                output_file,
+                format="WEBP",
+                save_all=True,
+                append_images=frames,
+                duration=duration_ms,
+                loop=loop_count,
+                lossless=True,
+            )
+            for f in frames:
+                try:
+                    f.close()
+                except Exception:
+                    pass
+            return output_file
+
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            return ""
+
+        frame_pattern = str(frames_dir / "frame_%08d.png")
+        command = [
+            ffmpeg,
+            "-y",
+            "-loglevel",
+            "error",
+            "-r",
+            str(max(1.0, float(frame_rate))),
+            "-i",
+            frame_pattern,
+        ]
+        loop_count_int = int(loop_count or 0)
+        if loop_count_int > 0:
+            command.extend(
+                [
+                    "-vf",
+                    f"loop=loop={loop_count_int}:size={len(prepared_frames)}:start=0",
+                ]
+            )
+
+        audio_path = _coerce_video_path(audio)
+        command.extend(["-map", "0:v:0"])
+        if audio_path and Path(audio_path).exists():
+            command.extend(["-i", audio_path, "-map", "1:a?"])
+
+        if audio_path and Path(audio_path).exists():
+            command.extend(["-c:a", "aac", "-shortest"])
+        else:
+            command.extend(["-an"])
+
+        if ext == "m3u8":
+            command.extend(
+                [
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-f",
+                    "hls",
+                    "-hls_list_size",
+                    "0",
+                    "-hls_flags",
+                    "append_list",
+                    "-hls_segment_filename",
+                    str(Path(output_file).with_suffix(".%03d.ts")),
+                ]
+            )
+        else:
+            command.extend(
+                [
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-movflags",
+                    "+faststart",
+                ]
+            )
+        command.append(output_file)
+
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            return ""
+        if not Path(output_file).exists():
+            return ""
+        return output_file
+    finally:
+        for path in frame_paths:
+            try:
+                Path(path).unlink()
+            except Exception:
+                pass
+        try:
+            shutil.rmtree(frames_dir, ignore_errors=True)
+        except Exception:
+            pass
 
 
 class GX10TextInput:
@@ -375,13 +617,20 @@ class GX10SaveVideo:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "video": ("STRING", {"default": "", "multiline": False}),
                 "audio": ("STRING", {"default": "", "multiline": False}),
                 "run_id": ("STRING", {"default": "", "multiline": False}),
                 "callback_url": ("STRING", {"default": "", "multiline": False}),
                 "auth_header": ("STRING", {"default": "", "multiline": False}),
             },
             "optional": {
+                "video": ("STRING", {"default": "", "multiline": False}),
+                "images": ("IMAGE",),
+                "frame_rate": ("FLOAT", {"default": 8.0, "min": 0.1, "max": 120.0, "step": 0.1}),
+                "filename_prefix": ("STRING", {"default": "gx10_video", "multiline": False}),
+                "format": ("STRING", {"default": "video/mp4", "multiline": False}),
+                "pingpong": ("BOOLEAN", {"default": False}),
+                "loop_count": ("INT", {"default": 0, "min": 0, "max": 100, "step": 1}),
+                "save_output": ("BOOLEAN", {"default": True}),
                 "hls_url": ("STRING", {"default": "", "multiline": False}),
                 "hls_base_url": ("STRING", {"default": "", "multiline": False}),
                 "prefer_hls": ("BOOLEAN", {"default": True}),
@@ -397,11 +646,18 @@ class GX10SaveVideo:
 
     def save_video(
         self,
-        video: str,
         audio: str,
         run_id: str,
         callback_url: str,
         auth_header: str = "",
+        video: str = "",
+        images=None,
+        frame_rate: float = 8.0,
+        filename_prefix: str = "gx10_video",
+        format: str = "video/mp4",
+        pingpong: bool = False,
+        loop_count: int = 0,
+        save_output: bool = True,
         hls_url: str = "",
         hls_base_url: str = "",
         prefer_hls: bool = True,
@@ -409,30 +665,51 @@ class GX10SaveVideo:
     ) -> Dict[str, object]:
         run_id = str(run_id).strip()
         callback_url = str(callback_url).strip()
-        video = str(video)
-        source_url = _coerce_video_path(video)
+        video = str(video or "").strip()
+        frame_rate_value = float(frame_rate) if frame_rate else 8.0
+        audio_path = _coerce_audio_path(audio)
+        source_url = ""
+        if images is not None:
+            source_url = _build_video_from_frames(
+                frames=_coerce_video_frames(images),
+                frame_rate=frame_rate_value,
+                filename_prefix=str(filename_prefix or "gx10_video").strip(),
+                audio=audio_path,
+                save_output=bool(save_output),
+                loop_count=int(loop_count or 0),
+                pingpong=bool(pingpong),
+                format_value=str(format or "video/mp4"),
+            )
+        if not source_url:
+            source_url = _coerce_video_path(video)
         if not source_url:
             return {"ui": {"video": []}}
 
         result_url = _resolve_hls_media(
-            video=video,
+            video=source_url,
             prefer_hls=bool(prefer_hls),
             hls_only=bool(hls_only),
             hls_url=hls_url,
             hls_base_url=hls_base_url,
         )
         if not result_url:
-            return {"ui": {"video": []}}
+            result_url = source_url
 
         payload = {
             "run_id": run_id,
             "status": "succeeded",
             "result_url": source_url,
             "hls_url": result_url if _is_hls_url(result_url) else None,
-            "metadata": {},
-            "signature": None,
-            "audio": str(audio),
+            "metadata": {
+                "format": str(format or "").strip(),
+                "frame_rate": frame_rate_value,
+                "pingpong": bool(pingpong),
+                "loop_count": int(loop_count or 0),
+                "save_output": bool(save_output),
+            },
         }
+        if audio_path:
+            payload["audio"] = audio_path
         payload["metadata"]["streaming_protocol"] = "hls" if _is_hls_url(result_url) else "file"
         payload["metadata"]["streaming_source"] = "hls" if _is_hls_url(result_url) else "file"
         if _is_hls_url(result_url):
@@ -474,6 +751,26 @@ def _coerce_video_path(value: object) -> str:
             path = _coerce_video_path(item)
             if path:
                 return path
+    return ""
+
+
+def _coerce_audio_path(value: object) -> str:
+    if not value:
+        return ""
+    if isinstance(value, str):
+        return value.strip().replace("file://", "", 1) if value.strip().startswith("file://") else value.strip()
+    if isinstance(value, Path):
+        return str(value).strip()
+    if isinstance(value, dict):
+        for key in ("path", "filename", "file", "uri", "audio", "source", "url"):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            candidate = _coerce_audio_path(item)
+            if candidate:
+                return candidate
     return ""
 
 
@@ -552,6 +849,78 @@ def _collect_hls_candidates(video_path: Path) -> List[Path]:
     return list(dict.fromkeys(candidates))
 
 
+def _build_hls_path(video_path: str) -> str:
+    base = Path(video_path)
+    if not base.suffix:
+        return str(base.with_name(f"{base.name}.m3u8"))
+    return str(base.with_suffix(".m3u8"))
+
+
+def _ensure_hls_playlist(video_path: str) -> str:
+    source = Path(_coerce_video_path(video_path))
+    if not source.exists() or not source.is_file():
+        return ""
+    if source.suffix.lower() == ".m3u8":
+        return str(source)
+    if source.suffix.lower() not in {
+        ".mp4",
+        ".webm",
+        ".mov",
+        ".avi",
+        ".mkv",
+        ".m4v",
+        ".flv",
+    }:
+        return ""
+
+    playlist = Path(_build_hls_path(str(source)))
+    if playlist.exists():
+        if not playlist.is_file():
+            return ""
+        return str(playlist)
+
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return ""
+
+    segment_template = str(playlist.with_name(f"{playlist.stem}_%03d.ts"))
+    command = [
+        ffmpeg,
+        "-y",
+        "-loglevel",
+        "error",
+        "-i",
+        str(source),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-shortest",
+        "-f",
+        "hls",
+        "-hls_list_size",
+        "0",
+        "-hls_flags",
+        "append_list",
+        "-hls_segment_filename",
+        segment_template,
+        str(playlist),
+    ]
+
+    result = subprocess.run(command, capture_output=True, check=False)
+    if result.returncode != 0:
+        return ""
+    if not playlist.exists():
+        return ""
+    return str(playlist)
+
+
 def _resolve_hls_media(
     video: str,
     prefer_hls: bool = True,
@@ -583,6 +952,9 @@ def _resolve_hls_media(
         for candidate in candidates:
             if candidate.exists():
                 return _to_public_url(str(candidate), hls_base_url)
+        generated = _ensure_hls_playlist(str(path))
+        if generated:
+            return _to_public_url(generated, hls_base_url)
 
     if source.startswith("http") and not source.lower().endswith(".m3u8"):
         parsed = source.rsplit(".", 1)
