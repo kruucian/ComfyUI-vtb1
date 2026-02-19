@@ -114,8 +114,8 @@ class GX10TextInput:
             }
         }
 
-    RETURN_TYPES = ("STRING", "STRING")
-    RETURN_NAMES = ("texts", "auth_header")
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("texts", "auth_header", "run_id", "callback_url")
     FUNCTION = "pack"
     OUTPUT_NODE = False
     CATEGORY = "GX10"
@@ -126,11 +126,9 @@ class GX10TextInput:
         auth_header: str,
         run_id: str,
         callback_url: str,
-    ) -> Tuple[str, str]:
-        del run_id
-        del callback_url
+    ) -> Tuple[str, str, str, str]:
         _, _, merged_texts = _normalize_text_inputs(texts=texts)
-        return (merged_texts, str(auth_header))
+        return (merged_texts, str(auth_header), str(run_id), str(callback_url))
 
 
 class GX10ImageInput:
@@ -147,8 +145,8 @@ class GX10ImageInput:
             }
         }
 
-    RETURN_TYPES = ("STRING", "IMAGE", "STRING")
-    RETURN_NAMES = ("texts", "image", "auth_header")
+    RETURN_TYPES = ("STRING", "IMAGE", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("texts", "image", "auth_header", "run_id", "callback_url")
     FUNCTION = "pack"
     OUTPUT_NODE = False
     CATEGORY = "GX10"
@@ -161,9 +159,7 @@ class GX10ImageInput:
         image_path: str,
         run_id: str,
         callback_url: str,
-    ) -> Tuple[str, torch.Tensor, str]:
-        del run_id
-        del callback_url
+    ) -> Tuple[str, torch.Tensor, str, str, str]:
         _, _, merged_texts = _normalize_text_inputs(texts=texts)
 
         image_candidates = [image_path, first_frame_image]
@@ -177,7 +173,7 @@ class GX10ImageInput:
         if output_image is None:
             output_image = torch.zeros((1, 1, 1, 3), dtype=torch.float32)
 
-        return (merged_texts, output_image, str(auth_header))
+        return (merged_texts, output_image, str(auth_header), str(run_id), str(callback_url))
 
 
 class GX10ImageUpload:
@@ -297,6 +293,7 @@ class GX10SaveImage:
         return {
             "required": {
                 "images": ("IMAGE",),
+                "audio": ("STRING", {"default": "", "multiline": False}),
                 "run_id": ("STRING", {"default": "", "multiline": False}),
                 "callback_url": ("STRING", {"default": "", "multiline": False}),
                 "auth_header": ("STRING", {"default": "", "multiline": False}),
@@ -312,6 +309,7 @@ class GX10SaveImage:
     def save_images(
         self,
         images: torch.Tensor,
+        audio: str,
         run_id: str,
         callback_url: str,
         auth_header: str = "",
@@ -343,11 +341,13 @@ class GX10SaveImage:
                 "format": first["format"],
                 "index": first["index"],
                 "image_b64": first["image_b64"],
+                "audio": str(audio),
             }
         else:
             payload = {
                 "run_id": run_id,
                 "images": images_payload,
+                "audio": str(audio),
             }
 
         detail = _post_callback(callback_url, payload, auth_header=auth_header)
@@ -376,6 +376,7 @@ class GX10SaveVideo:
         return {
             "required": {
                 "video": ("STRING", {"default": "", "multiline": False}),
+                "audio": ("STRING", {"default": "", "multiline": False}),
                 "run_id": ("STRING", {"default": "", "multiline": False}),
                 "callback_url": ("STRING", {"default": "", "multiline": False}),
                 "auth_header": ("STRING", {"default": "", "multiline": False}),
@@ -397,6 +398,7 @@ class GX10SaveVideo:
     def save_video(
         self,
         video: str,
+        audio: str,
         run_id: str,
         callback_url: str,
         auth_header: str = "",
@@ -429,6 +431,7 @@ class GX10SaveVideo:
             "hls_url": result_url if _is_hls_url(result_url) else None,
             "metadata": {},
             "signature": None,
+            "audio": str(audio),
         }
         payload["metadata"]["streaming_protocol"] = "hls" if _is_hls_url(result_url) else "file"
         payload["metadata"]["streaming_source"] = "hls" if _is_hls_url(result_url) else "file"

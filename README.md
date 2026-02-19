@@ -9,18 +9,20 @@ Nodes
   - `texts` (newline, comma, or JSON array style)
   - Internal merge results are exposed only as `texts` (JSON array string) for downstream routing.
   - Inputs:
-    - `texts`, `run_id`, `callback_url`, `auth_header`
+    - `texts`, `auth_header`, `run_id`, `callback_url`
   - Also outputs:
-    - `texts`, `auth_header`
+    - `texts`, `auth_header`, `run_id`, `callback_url`
   - `seed`, `width`, `height`, `negative_prompt`, `metadata_json`, `mode` are not exposed on this node.
 - `GX10ImageInput`
   - i2v input node that carries `IMAGE` and i2v-related prompt inputs.
   - Uses only `texts` (string list format: newline / comma / JSON array) for prompt payload.
   - Inputs:
-    - `texts`, `first_frame_image`, `image_path`, `run_id`, `callback_url`, `auth_header`
+    - `texts`, `auth_header`, `first_frame_image`, `image_path`, `run_id`, `callback_url`
   - Accepts first-frame source as `first_frame_image` or `image_path` and converts to ComfyUI image tensor when provided.
   - `image` input is not supported.
-  - Outputs text list plus image tensor and passthrough `auth_header` for downstream callback connection.
+  - Outputs:
+    - `texts`, `IMAGE`, `auth_header`, `run_id`, `callback_url`.
+    - `auth_header`, `run_id`, `callback_url` can be passed directly to callback nodes.
 - `GX10ImageUpload`
   - Callback output node for image artifacts.
   - Inputs are `images`, `run_id`, `callback_url`, `auth_header`.
@@ -29,15 +31,14 @@ Nodes
 - `GX10SaveImage`
   - Save-image style callback node.
   - Input shape is close to `SaveImage`:
-    - `images`
-    - `callback_url`, `run_id`, `auth_header`
+    - `images`, `audio`, `callback_url`, `run_id`, `auth_header`.
   - Sends the same artifact payload as `GX10ImageUpload` so you can wire it where `SaveImage` is usually used.
   - 동시에 프리뷰 이미지(`ui.images`)를 출력해 ComfyUI 캔버스에 출력합니다.
 - `GX10SaveVideo`
   - Save-video style callback node (VHS output compatible).
   - Input:
     - `video` (string path / URI)
-    - `callback_url`, `run_id`
+    - `audio`, `callback_url`, `run_id`, `auth_header`
     - `hls_url`, `hls_base_url`, `prefer_hls`, `hls_only` (optional)
   - Sends `/callbacks/artifact`-compatible payload with `result_url` and HLS metadata (`stream_hls_url`, `streaming_protocol`).
   - 동시에 `ui.video`에 최근 6개 완료 영상을 오른쪽 리스트로 누적해서 출력합니다.
