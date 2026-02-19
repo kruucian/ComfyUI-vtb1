@@ -81,6 +81,16 @@ def _normalize_text_inputs(prompt: str = "", text: str = "", texts: str = "") ->
     return merged_prompt, primary, merged_json
 
 
+def _split_prompt_triplet(texts: str = "") -> Tuple[str, str, str]:
+    items = _coerce_text_list(texts)
+    if not items:
+        return "", "", ""
+    tts_prompt = items[0]
+    positive_prompt = items[1] if len(items) > 1 else tts_prompt
+    negative_prompt = items[2] if len(items) > 2 else ""
+    return tts_prompt, positive_prompt, negative_prompt
+
+
 def _to_tensor_from_file(path: str) -> torch.Tensor | None:
     path = str(path or "").strip()
     if not path:
@@ -388,8 +398,16 @@ class GX10ImageInput:
             }
         }
 
-    RETURN_TYPES = ("STRING", "IMAGE", "STRING", "STRING", "STRING")
-    RETURN_NAMES = ("texts", "image", "auth_header", "run_id", "callback_url")
+    RETURN_TYPES = ("STRING", "IMAGE", "STRING", "STRING", "STRING", "STRING", "STRING")
+    RETURN_NAMES = (
+        "tts_prompt",
+        "image",
+        "auth_header",
+        "run_id",
+        "callback_url",
+        "positive_prompt",
+        "negative_prompt",
+    )
     FUNCTION = "pack"
     OUTPUT_NODE = False
     CATEGORY = "GX10"
@@ -402,8 +420,8 @@ class GX10ImageInput:
         image_path: str,
         run_id: str,
         callback_url: str,
-    ) -> Tuple[str, torch.Tensor, str, str, str]:
-        _, _, merged_texts = _normalize_text_inputs(texts=texts)
+    ) -> Tuple[str, torch.Tensor, str, str, str, str, str]:
+        tts_prompt, positive_prompt, negative_prompt = _split_prompt_triplet(texts=texts)
 
         image_candidates = [image_path, first_frame_image]
         output_image: torch.Tensor | None = None
@@ -416,7 +434,15 @@ class GX10ImageInput:
         if output_image is None:
             output_image = torch.zeros((1, 1, 1, 3), dtype=torch.float32)
 
-        return (merged_texts, output_image, str(auth_header), str(run_id), str(callback_url))
+        return (
+            tts_prompt,
+            output_image,
+            str(auth_header),
+            str(run_id),
+            str(callback_url),
+            positive_prompt,
+            negative_prompt,
+        )
 
 
 class GX10ImageUpload:
