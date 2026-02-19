@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import wave
 import io
 import json
 import os
@@ -617,12 +618,13 @@ class GX10SaveVideo:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "audio": ("STRING", {"default": "", "multiline": False}),
                 "run_id": ("STRING", {"default": "", "multiline": False}),
                 "callback_url": ("STRING", {"default": "", "multiline": False}),
                 "auth_header": ("STRING", {"default": "", "multiline": False}),
             },
             "optional": {
+                "audio": ("AUDIO",),
+                "audio_path": ("STRING", {"default": "", "multiline": False}),
                 "video": ("STRING", {"default": "", "multiline": False}),
                 "images": ("IMAGE",),
                 "frame_rate": ("FLOAT", {"default": 8.0, "min": 0.1, "max": 120.0, "step": 0.1}),
@@ -646,10 +648,11 @@ class GX10SaveVideo:
 
     def save_video(
         self,
-        audio: str,
         run_id: str,
         callback_url: str,
         auth_header: str = "",
+        audio=None,
+        audio_path: str = "",
         video: str = "",
         images=None,
         frame_rate: float = 8.0,
@@ -663,71 +666,82 @@ class GX10SaveVideo:
         prefer_hls: bool = True,
         hls_only: bool = True,
     ) -> Dict[str, object]:
+        audio_temp_files: List[str] = []
         run_id = str(run_id).strip()
         callback_url = str(callback_url).strip()
+        audio_path_input = str(audio_path or "").strip()
         video = str(video or "").strip()
         frame_rate_value = float(frame_rate) if frame_rate else 8.0
-        audio_path = _coerce_audio_path(audio)
-        source_url = ""
-        if images is not None:
-            source_url = _build_video_from_frames(
-                frames=_coerce_video_frames(images),
-                frame_rate=frame_rate_value,
-                filename_prefix=str(filename_prefix or "gx10_video").strip(),
-                audio=audio_path,
-                save_output=bool(save_output),
-                loop_count=int(loop_count or 0),
-                pingpong=bool(pingpong),
-                format_value=str(format or "video/mp4"),
+        try:
+            audio_path = _coerce_audio_path(audio, audio_temp_files)
+            if not audio_path and audio_path_input:
+                audio_path = _coerce_audio_path(audio_path_input, audio_temp_files)
+            source_url = ""
+            if images is not None:
+                source_url = _build_video_from_frames(
+                    frames=_coerce_video_frames(images),
+                    frame_rate=frame_rate_value,
+                    filename_prefix=str(filename_prefix or "gx10_video").strip(),
+                    audio=audio_path,
+                    save_output=bool(save_output),
+                    loop_count=int(loop_count or 0),
+                    pingpong=bool(pingpong),
+                    format_value=str(format or "video/mp4"),
+                )
+            if not source_url:
+                source_url = _coerce_video_path(video)
+            if not source_url:
+                return {"ui": {"video": []}}
+
+            result_url = _resolve_hls_media(
+                video=source_url,
+                prefer_hls=bool(prefer_hls),
+                hls_only=bool(hls_only),
+                hls_url=hls_url,
+                hls_base_url=hls_base_url,
             )
-        if not source_url:
-            source_url = _coerce_video_path(video)
-        if not source_url:
-            return {"ui": {"video": []}}
+            if not result_url:
+                result_url = source_url
 
-        result_url = _resolve_hls_media(
-            video=source_url,
-            prefer_hls=bool(prefer_hls),
-            hls_only=bool(hls_only),
-            hls_url=hls_url,
-            hls_base_url=hls_base_url,
-        )
-        if not result_url:
-            result_url = source_url
+            payload = {
+                "run_id": run_id,
+                "status": "succeeded",
+                "result_url": source_url,
+                "hls_url": result_url if _is_hls_url(result_url) else None,
+                "metadata": {
+                    "format": str(format or "").strip(),
+                    "frame_rate": frame_rate_value,
+                    "pingpong": bool(pingpong),
+                    "loop_count": int(loop_count or 0),
+                    "save_output": bool(save_output),
+                },
+            }
+            if audio_path:
+                payload["audio"] = audio_path
+            payload["metadata"]["streaming_protocol"] = "hls" if _is_hls_url(result_url) else "file"
+            payload["metadata"]["streaming_source"] = "hls" if _is_hls_url(result_url) else "file"
+            if _is_hls_url(result_url):
+                payload["metadata"]["stream_hls_url"] = result_url
 
-        payload = {
-            "run_id": run_id,
-            "status": "succeeded",
-            "result_url": source_url,
-            "hls_url": result_url if _is_hls_url(result_url) else None,
-            "metadata": {
-                "format": str(format or "").strip(),
-                "frame_rate": frame_rate_value,
-                "pingpong": bool(pingpong),
-                "loop_count": int(loop_count or 0),
-                "save_output": bool(save_output),
-            },
-        }
-        if audio_path:
-            payload["audio"] = audio_path
-        payload["metadata"]["streaming_protocol"] = "hls" if _is_hls_url(result_url) else "file"
-        payload["metadata"]["streaming_source"] = "hls" if _is_hls_url(result_url) else "file"
-        if _is_hls_url(result_url):
-            payload["metadata"]["stream_hls_url"] = result_url
+            if callback_url:
+                detail = _post_callback(callback_url, payload, auth_header=auth_header)
+                if isinstance(detail, dict):
+                    detail.setdefault("run_id", run_id)
+                    detail.setdefault("status", "error")
 
-        if callback_url:
-            detail = _post_callback(callback_url, payload, auth_header=auth_header)
-            if isinstance(detail, dict):
-                detail.setdefault("run_id", run_id)
-                detail.setdefault("status", "error")
-
-        ui_videos = self._normalize_video_history(
-            _preview_video_items(
-                result_url=str(source_url),
-                filename_prefix="gx10",
+            ui_videos = self._normalize_video_history(
+                _preview_video_items(
+                    result_url=str(source_url),
+                    filename_prefix="gx10",
+                )
             )
-        )
-        return {"ui": {"video": ui_videos}}
+            return {"ui": {"video": ui_videos}}
+        finally:
+            for path in audio_temp_files:
+                try:
+                    Path(path).unlink()
+                except Exception:
+                    pass
 
 
 def _coerce_video_path(value: object) -> str:
@@ -754,7 +768,7 @@ def _coerce_video_path(value: object) -> str:
     return ""
 
 
-def _coerce_audio_path(value: object) -> str:
+def _coerce_audio_path(value: object, temp_audio_paths: List[str] | None = None) -> str:
     if not value:
         return ""
     if isinstance(value, str):
@@ -766,12 +780,83 @@ def _coerce_audio_path(value: object) -> str:
             candidate = value.get(key)
             if isinstance(candidate, str) and candidate.strip():
                 return candidate.strip()
+        waveform = value.get("waveform") if isinstance(value, dict) else None
+        sample_rate = value.get("sample_rate") if isinstance(value, dict) else None
+        if waveform is not None:
+            return _coerce_audio_waveform(waveform, sample_rate, temp_audio_paths)
     if isinstance(value, (list, tuple)):
         for item in value:
-            candidate = _coerce_audio_path(item)
+            candidate = _coerce_audio_path(item, temp_audio_paths)
             if candidate:
                 return candidate
     return ""
+
+
+def _coerce_audio_waveform(
+    waveform: object,
+    sample_rate: object = 44100,
+    temp_audio_paths: List[str] | None = None,
+) -> str:
+    try:
+        arr = torch.as_tensor(waveform, dtype=torch.float32)
+    except Exception:
+        return ""
+    if not torch.is_floating_point(arr):
+        arr = arr.to(dtype=torch.float32)
+    if arr.ndim > 3:
+        return ""
+    if arr.ndim == 3 and arr.shape[0] == 1:
+        arr = arr[0]
+    if arr.ndim == 1:
+        arr = arr.unsqueeze(0)
+    if arr.ndim != 2:
+        return ""
+
+    # Normalize to (channels, samples).
+    if arr.shape[0] <= 16 and arr.shape[0] <= arr.shape[1]:
+        pass
+    elif arr.shape[1] <= 16:
+        arr = arr.t()
+    else:
+        arr = arr.reshape(arr.shape[0], -1)
+
+    channels = arr.shape[0]
+    if channels <= 0:
+        return ""
+
+    try:
+        sr = int(sample_rate) if sample_rate else 44100
+    except Exception:
+        sr = 44100
+    if sr <= 0:
+        sr = 44100
+
+    arr = arr.clip(-1.0, 1.0)
+    arr = (arr * 32767.0).short().cpu().numpy()
+    if arr.ndim != 2:
+        return ""
+    if channels > 0:
+        samples = arr.transpose(1, 0)
+    else:
+        return ""
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        path = tmp.name
+    try:
+        with wave.open(path, "wb") as wf:
+            wf.setnchannels(int(channels))
+            wf.setsampwidth(2)
+            wf.setframerate(sr)
+            wf.writeframes(samples.tobytes())
+        if temp_audio_paths is not None:
+            temp_audio_paths.append(path)
+        return path
+    except Exception:
+        try:
+            Path(path).unlink()
+        except Exception:
+            pass
+        return ""
 
 
 def _sanitize_uimeta_path(path: str) -> str:
