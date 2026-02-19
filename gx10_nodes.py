@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import sys
 from urllib.parse import urljoin, urlparse
 import urllib.error
 import urllib.request
@@ -202,6 +203,16 @@ def _build_video_from_frames(
         "video/x-flv": "flv",
         "video/x-matroska": "mkv",
         "video/mkv": "mkv",
+        "video/h264-mp4": "mp4",
+        "video/h265-mp4": "mp4",
+        "video/nvenc_h264-mp4": "mp4",
+        "video/nvenc_hevc-mp4": "mp4",
+        "video/nvenc_av1-mp4": "mp4",
+        "video/av1-webm": "webm",
+        "video/prores": "mov",
+        "video/ffv1-mkv": "mkv",
+        "video/ffmpeg-gif": "gif",
+        "video/gifski": "gif",
         "video/x-mpegurl": "m3u8",
         "image/gif": "gif",
         "image/webp": "webp",
@@ -353,6 +364,217 @@ def _build_video_from_frames(
             shutil.rmtree(frames_dir, ignore_errors=True)
         except Exception:
             pass
+
+
+def _get_vhs_video_combine():
+    try:
+        from videohelpersuite.nodes import VideoCombine
+
+        return VideoCombine
+    except Exception:
+        fallback_root = Path(__file__).resolve().parent.parent / "ComfyUI-VideoHelperSuite"
+        try:
+            if str(fallback_root) not in sys.path:
+                sys.path.append(str(fallback_root))
+            from videohelpersuite.nodes import VideoCombine
+
+            return VideoCombine
+        except Exception:
+            return None
+
+
+def _coerce_vhs_audio(audio_path: str) -> Dict[str, object] | None:
+    if not audio_path:
+        return None
+    try:
+        from videohelpersuite.utils import get_audio
+
+        return get_audio(audio_path)
+    except Exception:
+        return None
+
+
+def _get_vhs_format_options() -> List[str]:
+    defaults = [
+        "image/gif",
+        "image/webp",
+        "video/h264-mp4",
+        "video/webm",
+        "video/ProRes",
+        "video/ffv1-mkv",
+        "video/h265-mp4",
+    ]
+    VideoCombine = _get_vhs_video_combine()
+    if VideoCombine is None:
+        return defaults
+    try:
+        input_types = VideoCombine.INPUT_TYPES()
+        required = input_types.get("required", {})
+        format_field = required.get("format")
+        if (
+            isinstance(format_field, tuple)
+            and format_field
+            and isinstance(format_field[0], (list, tuple))
+        ):
+            formats = [str(item) for item in format_field[0] if str(item).strip()]
+            if formats:
+                return formats
+    except Exception:
+        pass
+    return defaults
+
+
+def _normalize_vhs_format(format_value: str) -> str:
+    requested = str(format_value or "").strip()
+    format_options = _get_vhs_format_options()
+    option_map = {str(item).lower(): str(item) for item in format_options if str(item).strip()}
+    if not option_map:
+        return "video/h264-mp4"
+
+    if requested:
+        direct = option_map.get(requested.lower())
+        if direct:
+            return direct
+        if requested.startswith("."):
+            requested = requested[1:]
+        if "/" not in requested:
+            as_video = option_map.get(f"video/{requested.lower()}")
+            if as_video:
+                return as_video
+            as_image = option_map.get(f"image/{requested.lower()}")
+            if as_image:
+                return as_image
+
+    key = str(format_value or "").strip().lower()
+    alias_map = {
+        "video/mp4": [
+            "video/h264-mp4",
+            "video/nvenc_h264-mp4",
+            "video/h265-mp4",
+            "video/nvenc_hevc-mp4",
+            "video/nvenc_av1-mp4",
+        ],
+        "video/webm": ["video/webm", "video/av1-webm"],
+        "video/mov": ["video/prores"],
+        "video/mkv": ["video/ffv1-mkv"],
+        "video/x-matroska": ["video/ffv1-mkv"],
+        "video/x-m4v": ["video/h264-mp4"],
+        "video/avi": ["video/h264-mp4"],
+        "video/x-flv": ["video/h264-mp4"],
+        "image/gif": ["image/gif", "video/ffmpeg-gif", "video/gifski"],
+        "image/webp": ["image/webp"],
+    }
+    for candidate in alias_map.get(key, []):
+        resolved = option_map.get(candidate.lower())
+        if resolved:
+            return resolved
+
+    ext_alias_map = {
+        "mp4": alias_map["video/mp4"],
+        "webm": alias_map["video/webm"],
+        "mov": alias_map["video/mov"],
+        "mkv": alias_map["video/mkv"],
+        "gif": alias_map["image/gif"],
+        "webp": alias_map["image/webp"],
+    }
+    if key.startswith("video/") or key.startswith("image/"):
+        ext_key = key.split("/", 1)[1]
+    else:
+        ext_key = key.strip(".")
+    for candidate in ext_alias_map.get(ext_key, []):
+        resolved = option_map.get(candidate.lower())
+        if resolved:
+            return resolved
+
+    for candidate in ("video/h264-mp4", "video/webm", "image/gif", "image/webp"):
+        resolved = option_map.get(candidate.lower())
+        if resolved:
+            return resolved
+    return next(iter(option_map.values()))
+
+
+def _extract_vhs_output_files(result: object) -> List[str]:
+    payload = result.get("result") if isinstance(result, dict) else result
+    if not isinstance(payload, tuple) or not payload:
+        return []
+    first = payload[0]
+    if not isinstance(first, tuple) or len(first) < 2 or not isinstance(first[1], (list, tuple)):
+        return []
+    return [str(path) for path in first[1] if str(path).strip()]
+
+
+def _pick_vhs_primary_output(output_files: Sequence[str]) -> str:
+    if not output_files:
+        return ""
+    video_exts = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v", ".flv", ".m3u8", ".gif", ".webp"}
+    for path in reversed(output_files):
+        candidate = str(path).strip()
+        if not candidate:
+            continue
+        suffix = Path(candidate).suffix.lower()
+        if suffix in video_exts and Path(candidate).exists():
+            return candidate
+    for path in reversed(output_files):
+        candidate = str(path).strip()
+        if candidate and Path(candidate).exists():
+            return candidate
+    return str(output_files[-1]).strip()
+
+
+def _extract_vhs_workflow_png(output_files: Sequence[str]) -> str:
+    if not output_files:
+        return ""
+    candidate = str(output_files[0]).strip()
+    if candidate and candidate.lower().endswith(".png"):
+        return candidate
+    return ""
+
+
+def _combine_with_vhs(
+    frames: Sequence[torch.Tensor],
+    frame_rate: float = 8.0,
+    filename_prefix: str = "gx10_video",
+    format_value: str = "video/mp4",
+    pingpong: bool = False,
+    loop_count: int = 0,
+    save_output: bool = True,
+    audio: object = None,
+    prompt: object = None,
+    extra_pnginfo: object = None,
+    unique_id: object = None,
+) -> Dict[str, object]:
+    empty_result = {"result_url": "", "output_files": [], "workflow_png": ""}
+    if not frames:
+        return empty_result
+
+    VideoCombine = _get_vhs_video_combine()
+    if VideoCombine is None:
+        return empty_result
+
+    try:
+        combine_node = VideoCombine()
+        normalized_format = _normalize_vhs_format(format_value)
+        result = combine_node.combine_video(
+            frame_rate=max(1.0, float(frame_rate or 8.0)),
+            loop_count=int(loop_count or 0),
+            images=frames,
+            filename_prefix=filename_prefix,
+            format=normalized_format,
+            pingpong=bool(pingpong),
+            save_output=bool(save_output),
+            audio=audio,
+            prompt=prompt,
+            extra_pnginfo=extra_pnginfo,
+            unique_id=unique_id,
+        )
+        output_files = _extract_vhs_output_files(result)
+        return {
+            "result_url": _pick_vhs_primary_output(output_files),
+            "output_files": output_files,
+            "workflow_png": _extract_vhs_workflow_png(output_files),
+        }
+    except Exception:
+        return empty_result
 
 
 class GX10TextInput:
@@ -642,6 +864,8 @@ class GX10SaveVideo:
 
     @classmethod
     def INPUT_TYPES(cls):
+        format_options = _get_vhs_format_options()
+        default_format = "video/h264-mp4" if "video/h264-mp4" in format_options else format_options[0]
         return {
             "required": {
                 "run_id": ("STRING", {"default": "", "multiline": False}),
@@ -651,11 +875,10 @@ class GX10SaveVideo:
             "optional": {
                 "audio": ("AUDIO",),
                 "audio_path": ("STRING", {"default": "", "multiline": False}),
-                "video": ("STRING", {"default": "", "multiline": False}),
                 "images": ("IMAGE",),
                 "frame_rate": ("FLOAT", {"default": 8.0, "min": 0.1, "max": 120.0, "step": 0.1}),
                 "filename_prefix": ("STRING", {"default": "gx10_video", "multiline": False}),
-                "format": ("STRING", {"default": "video/mp4", "multiline": False}),
+                "format": (format_options, {"default": default_format}),
                 "pingpong": ("BOOLEAN", {"default": False}),
                 "loop_count": ("INT", {"default": 0, "min": 0, "max": 100, "step": 1}),
                 "save_output": ("BOOLEAN", {"default": True}),
@@ -663,7 +886,12 @@ class GX10SaveVideo:
                 "hls_base_url": ("STRING", {"default": "", "multiline": False}),
                 "prefer_hls": ("BOOLEAN", {"default": True}),
                 "hls_only": ("BOOLEAN", {"default": True}),
-            }
+            },
+            "hidden": {
+                "prompt": "PROMPT",
+                "extra_pnginfo": "EXTRA_PNGINFO",
+                "unique_id": "UNIQUE_ID",
+            },
         }
 
     RETURN_TYPES = ()
@@ -679,11 +907,10 @@ class GX10SaveVideo:
         auth_header: str = "",
         audio=None,
         audio_path: str = "",
-        video: str = "",
         images=None,
         frame_rate: float = 8.0,
         filename_prefix: str = "gx10_video",
-        format: str = "video/mp4",
+        format: str = "video/h264-mp4",
         pingpong: bool = False,
         loop_count: int = 0,
         save_output: bool = True,
@@ -691,31 +918,58 @@ class GX10SaveVideo:
         hls_base_url: str = "",
         prefer_hls: bool = True,
         hls_only: bool = True,
+        prompt: object = None,
+        extra_pnginfo: object = None,
+        unique_id: object = None,
     ) -> Dict[str, object]:
         audio_temp_files: List[str] = []
         run_id = str(run_id).strip()
         callback_url = str(callback_url).strip()
         audio_path_input = str(audio_path or "").strip()
-        video = str(video or "").strip()
         frame_rate_value = float(frame_rate) if frame_rate else 8.0
         try:
             audio_path = _coerce_audio_path(audio, audio_temp_files)
+            audio_for_combine = None
+            if isinstance(audio, dict) and isinstance(audio.get("waveform", None), torch.Tensor):
+                audio_for_combine = audio
             if not audio_path and audio_path_input:
                 audio_path = _coerce_audio_path(audio_path_input, audio_temp_files)
+            if audio_for_combine is None and audio_path:
+                audio_for_combine = _coerce_vhs_audio(audio_path)
+                if audio_for_combine is None and isinstance(audio, dict):
+                    # Keep the legacy callback payload path resolution for already-provided AUDIO dict.
+                    audio_path = _coerce_audio_path(audio, audio_temp_files)
             source_url = ""
+            vhs_output_files: List[str] = []
+            workflow_png = ""
             if images is not None:
-                source_url = _build_video_from_frames(
+                vhs_result = _combine_with_vhs(
                     frames=_coerce_video_frames(images),
                     frame_rate=frame_rate_value,
                     filename_prefix=str(filename_prefix or "gx10_video").strip(),
-                    audio=audio_path,
+                    audio=audio_for_combine,
                     save_output=bool(save_output),
                     loop_count=int(loop_count or 0),
                     pingpong=bool(pingpong),
                     format_value=str(format or "video/mp4"),
+                    prompt=prompt,
+                    extra_pnginfo=extra_pnginfo,
+                    unique_id=unique_id,
                 )
-            if not source_url:
-                source_url = _coerce_video_path(video)
+                source_url = str(vhs_result.get("result_url") or "").strip()
+                vhs_output_files = [str(path) for path in vhs_result.get("output_files", []) if str(path).strip()]
+                workflow_png = str(vhs_result.get("workflow_png") or "").strip()
+                if not source_url:
+                    source_url = _build_video_from_frames(
+                        frames=_coerce_video_frames(images),
+                        frame_rate=frame_rate_value,
+                        filename_prefix=str(filename_prefix or "gx10_video").strip(),
+                        audio=audio_path,
+                        save_output=bool(save_output),
+                        loop_count=int(loop_count or 0),
+                        pingpong=bool(pingpong),
+                        format_value=str(format or "video/mp4"),
+                    )
             if not source_url:
                 return {"ui": {"video": []}}
 
@@ -744,6 +998,12 @@ class GX10SaveVideo:
             }
             if audio_path:
                 payload["audio"] = audio_path
+            if workflow_png:
+                payload["metadata"]["workflow_png"] = workflow_png
+            if vhs_output_files:
+                payload["metadata"]["vhs_output_files"] = vhs_output_files
+                if len(vhs_output_files) > 2:
+                    payload["metadata"]["vhs_intermediate_files"] = vhs_output_files[1:-1]
             payload["metadata"]["streaming_protocol"] = "hls" if _is_hls_url(result_url) else "file"
             payload["metadata"]["streaming_source"] = "hls" if _is_hls_url(result_url) else "file"
             if _is_hls_url(result_url):
@@ -1145,7 +1405,8 @@ def _preview_video_items(result_url: str, filename_prefix: str = "gx10") -> List
     if not result_url:
         return []
     path = Path(result_url)
-    if path.suffix.lower() not in {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v", ".flv", ".m3u8"}:
+    suffix = path.suffix.lower()
+    if suffix not in {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v", ".flv", ".m3u8", ".gif", ".webp"}:
         return []
     rel_name, dir_type = _ensure_folder_compatible_preview_file(result_url, subdir=f"{filename_prefix}")
     if not rel_name:
@@ -1157,12 +1418,17 @@ def _preview_video_items(result_url: str, filename_prefix: str = "gx10") -> List
     else:
         subfolder = "/".join(parts[:-1])
         filename = parts[-1]
+    preview_format = {
+        ".m3u8": "video/x-mpegurl",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+    }.get(suffix, "video/mp4")
     return [
         {
             "filename": filename,
             "subfolder": subfolder,
             "type": dir_type or "output",
-            "format": "video/x-mpegurl" if path.suffix.lower() == ".m3u8" else "video/mp4",
+            "format": preview_format,
         }
     ]
 
