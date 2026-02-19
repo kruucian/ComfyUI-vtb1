@@ -72,7 +72,7 @@ def _coerce_images(images: Sequence[object]) -> List[torch.Tensor]:
     return tensor_images
 
 
-def _normalize_text_inputs(prompt: str, text: str, texts: str) -> Tuple[str, str, str]:
+def _normalize_text_inputs(prompt: str = "", text: str = "", texts: str = "") -> Tuple[str, str, str]:
     primary = str(prompt or text or "").strip()
     extra = _coerce_text_list(texts)
     merged_items: List[str] = []
@@ -122,28 +122,14 @@ class GX10TextInput:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "prompt": ("STRING", {"multiline": True, "default": ""}),
-                "text": ("STRING", {"multiline": True, "default": ""}),
                 "texts": ("STRING", {"multiline": True, "default": ""}),
-                "negative_prompt": ("STRING", {"multiline": True, "default": ""}),
-                "seed": ("INT", {"default": 0, "min": -1, "max": 2_147_483_647}),
-                "width": ("INT", {"default": 1024, "min": 1, "max": 4096}),
-                "height": ("INT", {"default": 1024, "min": 1, "max": 4096}),
                 "run_id": ("STRING", {"default": "", "multiline": False}),
-                "metadata_json": ("STRING", {"multiline": True, "default": "{}"}),
                 "callback_url": ("STRING", {"default": "", "multiline": False}),
-                "mode": ("STRING", {"default": "t2i", "multiline": False}),
             }
         }
 
     RETURN_TYPES = (
         "STRING",
-        "STRING",
-        "STRING",
-        "STRING",
-        "INT",
-        "INT",
-        "INT",
         "STRING",
         "STRING",
         "STRING",
@@ -153,14 +139,8 @@ class GX10TextInput:
         "prompt",
         "text",
         "texts",
-        "negative_prompt",
-        "seed",
-        "width",
-        "height",
         "run_id",
-        "metadata_json",
         "callback_url",
-        "mode",
     )
     FUNCTION = "pack"
     OUTPUT_NODE = False
@@ -168,31 +148,17 @@ class GX10TextInput:
 
     def pack(
         self,
-        prompt: str,
-        text: str,
         texts: str,
-        negative_prompt: str,
-        seed: int,
-        width: int,
-        height: int,
         run_id: str,
-        metadata_json: str,
         callback_url: str,
-        mode: str,
-    ) -> Tuple[str, str, str, str, int, int, int, str, str, str, str]:
-        merged_prompt, merged_text, merged_texts = _normalize_text_inputs(prompt, text, texts)
+    ) -> Tuple[str, str, str, str, str]:
+        merged_prompt, merged_text, merged_texts = _normalize_text_inputs(texts=texts)
         return (
             merged_prompt,
             merged_text,
             merged_texts,
-            str(negative_prompt),
-            int(seed),
-            int(width),
-            int(height),
             str(run_id),
-            str(metadata_json),
             str(callback_url),
-            str(mode),
         )
 
 
@@ -396,10 +362,6 @@ class GX10SaveImage:
                 "images": ("IMAGE",),
                 "run_id": ("STRING", {"default": "", "multiline": False}),
                 "callback_url": ("STRING", {"default": "", "multiline": False}),
-                "metadata_json": ("STRING", {"multiline": True, "default": "{}"}),
-                "mode": ("STRING", {"default": "t2i", "multiline": False}),
-                "filename_prefix": ("STRING", {"default": "gx10", "multiline": False}),
-                "image_format": ("STRING", {"default": "png", "multiline": False}),
                 "auth_header": ("STRING", {"default": "", "multiline": False}),
             }
         }
@@ -415,18 +377,11 @@ class GX10SaveImage:
         images: torch.Tensor,
         run_id: str,
         callback_url: str,
-        metadata_json: str,
-        mode: str = "t2i",
-        filename_prefix: str = "gx10",
-        image_format: str = "png",
         auth_header: str = "",
     ) -> Dict[str, object]:
         run_id = str(run_id).strip()
         callback_url = str(callback_url).strip()
-        metadata = _normalize_metadata(metadata_json)
-        metadata.setdefault("mode", str(mode))
-        metadata.setdefault("filename_prefix", str(filename_prefix))
-        metadata.setdefault("format", str(image_format))
+        metadata = {}
 
         if not callback_url:
             return {"ui": {"images": []}}
@@ -438,7 +393,7 @@ class GX10SaveImage:
         images_payload = [
             {
                 "run_id": run_id,
-                "format": str(image_format),
+                "format": "png",
                 "index": index,
                 "image_b64": _encode_image_to_png_b64(image),
                 "metadata": metadata,
@@ -469,13 +424,23 @@ class GX10SaveImage:
         if isinstance(detail, dict):
             detail.setdefault("run_id", run_id)
             detail.setdefault("status", "error")
-        ui_images = _preview_image_items(image_list, filename_prefix=str(filename_prefix))
+        ui_images = _preview_image_items(image_list, filename_prefix="gx10")
         return {
             "ui": {"images": ui_images},
         }
 
 
 class GX10SaveVideo:
+    _VIDEO_PREVIEW_HISTORY: List[Dict[str, str]] = []
+
+    @classmethod
+    def _normalize_video_history(cls, new_items: List[Dict[str, str]]) -> List[Dict[str, str]]:
+        if new_items:
+            cls._VIDEO_PREVIEW_HISTORY.extend(new_items)
+        if len(cls._VIDEO_PREVIEW_HISTORY) > 6:
+            cls._VIDEO_PREVIEW_HISTORY = cls._VIDEO_PREVIEW_HISTORY[-6:]
+        return list(cls._VIDEO_PREVIEW_HISTORY)
+
     @classmethod
     def INPUT_TYPES(cls):
         return {
@@ -483,9 +448,6 @@ class GX10SaveVideo:
                 "video": ("STRING", {"default": "", "multiline": False}),
                 "run_id": ("STRING", {"default": "", "multiline": False}),
                 "callback_url": ("STRING", {"default": "", "multiline": False}),
-                "metadata_json": ("STRING", {"multiline": True, "default": "{}"}),
-                "status": ("STRING", {"default": "succeeded", "multiline": False}),
-                "mode": ("STRING", {"default": "i2v", "multiline": False}),
                 "auth_header": ("STRING", {"default": "", "multiline": False}),
             },
             "optional": {
@@ -493,7 +455,6 @@ class GX10SaveVideo:
                 "hls_base_url": ("STRING", {"default": "", "multiline": False}),
                 "prefer_hls": ("BOOLEAN", {"default": True}),
                 "hls_only": ("BOOLEAN", {"default": True}),
-                "filename_prefix": ("STRING", {"default": "gx10_i2v", "multiline": False}),
             }
         }
 
@@ -508,11 +469,7 @@ class GX10SaveVideo:
         video: str,
         run_id: str,
         callback_url: str,
-        metadata_json: str,
-        status: str = "succeeded",
-        mode: str = "i2v",
         auth_header: str = "",
-        filename_prefix: str = "gx10_i2v",
         hls_url: str = "",
         hls_base_url: str = "",
         prefer_hls: bool = True,
@@ -534,31 +491,31 @@ class GX10SaveVideo:
         )
         if not result_url:
             return {"ui": {"video": []}}
-        if not callback_url:
-            return {"ui": {"video": []}}
 
         payload = {
             "run_id": run_id,
-            "status": str(status).strip() or "succeeded",
+            "status": "succeeded",
             "result_url": source_url,
             "hls_url": result_url if _is_hls_url(result_url) else None,
-            "metadata": _normalize_metadata(metadata_json),
+            "metadata": {},
             "signature": None,
         }
-        payload["metadata"].setdefault("mode", str(mode))
-        payload["metadata"]["streaming_protocol"] = "hls"
+        payload["metadata"]["streaming_protocol"] = "hls" if _is_hls_url(result_url) else "file"
         payload["metadata"]["streaming_source"] = "hls" if _is_hls_url(result_url) else "file"
         if _is_hls_url(result_url):
             payload["metadata"]["stream_hls_url"] = result_url
 
-        detail = _post_callback(callback_url, payload, auth_header=auth_header)
-        if isinstance(detail, dict):
-            detail.setdefault("run_id", run_id)
-            detail.setdefault("status", "error")
-        detail.update({"run_id": run_id, "status": detail.get("status", "error") or "error"})
-        ui_videos = _preview_video_items(
-            result_url=str(source_url),
-            filename_prefix=str(filename_prefix),
+        if callback_url:
+            detail = _post_callback(callback_url, payload, auth_header=auth_header)
+            if isinstance(detail, dict):
+                detail.setdefault("run_id", run_id)
+                detail.setdefault("status", "error")
+
+        ui_videos = self._normalize_video_history(
+            _preview_video_items(
+                result_url=str(source_url),
+                filename_prefix="gx10",
+            )
         )
         return {"ui": {"video": ui_videos}}
 
