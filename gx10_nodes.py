@@ -8,7 +8,7 @@ import shutil
 from urllib.parse import urljoin, urlparse
 import urllib.error
 import urllib.request
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple
 from pathlib import Path
 
 import folder_paths
@@ -108,13 +108,14 @@ class GX10TextInput:
         return {
             "required": {
                 "texts": ("STRING", {"multiline": True, "default": ""}),
+                "auth_header": ("STRING", {"default": "", "multiline": False}),
                 "run_id": ("STRING", {"default": "", "multiline": False}),
                 "callback_url": ("STRING", {"default": "", "multiline": False}),
             }
         }
 
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("texts",)
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("texts", "auth_header")
     FUNCTION = "pack"
     OUTPUT_NODE = False
     CATEGORY = "GX10"
@@ -122,13 +123,14 @@ class GX10TextInput:
     def pack(
         self,
         texts: str,
+        auth_header: str,
         run_id: str,
         callback_url: str,
-    ) -> Tuple[str]:
+    ) -> Tuple[str, str]:
         del run_id
         del callback_url
         _, _, merged_texts = _normalize_text_inputs(texts=texts)
-        return (merged_texts,)
+        return (merged_texts, str(auth_header))
 
 
 class GX10ImageInput:
@@ -137,18 +139,16 @@ class GX10ImageInput:
         return {
             "required": {
                 "texts": ("STRING", {"multiline": True, "default": ""}),
+                "auth_header": ("STRING", {"default": "", "multiline": False}),
                 "first_frame_image": ("STRING", {"default": "", "multiline": False}),
                 "image_path": ("STRING", {"default": "", "multiline": False}),
                 "run_id": ("STRING", {"default": "", "multiline": False}),
                 "callback_url": ("STRING", {"default": "", "multiline": False}),
-            },
-            "optional": {
-                "image": ("IMAGE",),
             }
         }
 
-    RETURN_TYPES = ("STRING", "IMAGE")
-    RETURN_NAMES = ("texts", "image")
+    RETURN_TYPES = ("STRING", "IMAGE", "STRING")
+    RETURN_NAMES = ("texts", "image", "auth_header")
     FUNCTION = "pack"
     OUTPUT_NODE = False
     CATEGORY = "GX10"
@@ -156,12 +156,12 @@ class GX10ImageInput:
     def pack(
         self,
         texts: str,
+        auth_header: str,
         first_frame_image: str,
-        image: Optional[torch.Tensor],
         image_path: str,
         run_id: str,
         callback_url: str,
-    ) -> Tuple[str, torch.Tensor]:
+    ) -> Tuple[str, torch.Tensor, str]:
         del run_id
         del callback_url
         _, _, merged_texts = _normalize_text_inputs(texts=texts)
@@ -174,14 +174,10 @@ class GX10ImageInput:
             output_image = _to_tensor_from_file(path)
             if output_image is not None:
                 break
-
-        if output_image is None:
-            if image is not None:
-                output_image = _ensure_image_batch(image)
         if output_image is None:
             output_image = torch.zeros((1, 1, 1, 3), dtype=torch.float32)
 
-        return (merged_texts, output_image)
+        return (merged_texts, output_image, str(auth_header))
 
 
 class GX10ImageUpload:
@@ -452,20 +448,6 @@ class GX10SaveVideo:
             )
         )
         return {"ui": {"video": ui_videos}}
-
-
-def _ensure_image_batch(images: torch.Tensor) -> torch.Tensor:
-    if isinstance(images, torch.Tensor):
-        tensor = images
-    else:
-        tensor = torch.as_tensor(images)
-    if tensor.ndim == 3:
-        return tensor.unsqueeze(0)
-    if tensor.ndim == 4:
-        return tensor
-    if tensor.ndim == 1 and tensor.shape and tensor.shape[0] == 0:
-        return torch.empty((1, 0, 0, 3), dtype=torch.float32)
-    return tensor
 
 
 def _coerce_video_path(value: object) -> str:

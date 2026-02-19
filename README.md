@@ -6,17 +6,21 @@ Nodes
 - `GX10TextInput`
   - Prompt input node with multi-prompt support.
   - Uses one entry point:
-    - `texts` (newline, comma, or JSON array style)
+  - `texts` (newline, comma, or JSON array style)
   - Internal merge results are exposed only as `texts` (JSON array string) for downstream routing.
+  - Inputs:
+    - `texts`, `run_id`, `callback_url`, `auth_header`
   - Also outputs:
-    - `texts` only
+    - `texts`, `auth_header`
   - `seed`, `width`, `height`, `negative_prompt`, `metadata_json`, `mode` are not exposed on this node.
 - `GX10ImageInput`
   - i2v input node that carries `IMAGE` and i2v-related prompt inputs.
   - Uses only `texts` (string list format: newline / comma / JSON array) for prompt payload.
+  - Inputs:
+    - `texts`, `first_frame_image`, `image_path`, `run_id`, `callback_url`, `auth_header`
   - Accepts first-frame source as `first_frame_image` or `image_path` and converts to ComfyUI image tensor when provided.
-  - `image` input is optional if `image_path` / `first_frame_image` is given.
-  - Outputs text list plus image tensor for downstream WAN/i2v pipelines.
+  - `image` input is not supported.
+  - Outputs text list plus image tensor and passthrough `auth_header` for downstream callback connection.
 - `GX10ImageUpload`
   - Callback output node for image artifacts.
   - Inputs are `images`, `run_id`, `callback_url`, `auth_header`.
@@ -56,10 +60,9 @@ How to install into ComfyUI
 권장: 기존 `SaveImage`/VHS 노드 대신 `GX10SaveImage`, `GX10SaveVideo`를 사용하면 콜백 인터페이스를 통일하기 쉽습니다.
 
 Required input keys match orchestrator injection:
-- `GX10TextInput` path: `texts`, `run_id`, `callback_url`
-- `GX10ImageInput` path: `texts`, `first_frame_image` / `image_path`, `run_id`, `callback_url`
+- `GX10TextInput` path: `texts`, `run_id`, `callback_url`, `auth_header`
+- `GX10ImageInput` path: `texts`, `first_frame_image` / `image_path`, `run_id`, `callback_url`, `auth_header`
 - `first_frame_image` / `image_path` (for `GX10ImageInput`)
-- `image` (optional for `GX10ImageInput`, fallback when no image path)
 - `run_id`, `callback_url`
 - `auth_header` for upload endpoint auth when token is required
 
