@@ -7,22 +7,20 @@ Nodes
   - Prompt input node with multi-prompt support.
   - Uses one entry point:
     - `texts` (newline, comma, or JSON array style)
-  - If `texts` has multiple values, they are merged into a single `prompt` with newline separators.
+  - Internal merge results are exposed only as `texts` (JSON array string) for downstream routing.
   - Also outputs:
-    - `prompt`: merged prompt string
-    - `text`: base prompt
-    - `texts`: JSON array string for downstream handling
-    - `run_id`, `callback_url`
+    - `texts` only
   - `seed`, `width`, `height`, `negative_prompt`, `metadata_json`, `mode` are not exposed on this node.
 - `GX10ImageInput`
   - i2v input node that carries `IMAGE` and i2v-related prompt inputs.
-  - Supports `prompt`, `text`, `texts` just like `GX10TextInput`.
+  - Uses only `texts` (string list format: newline / comma / JSON array) for prompt payload.
   - Accepts first-frame source as `first_frame_image` or `image_path` and converts to ComfyUI image tensor when provided.
   - `image` input is optional if `image_path` / `first_frame_image` is given.
-  - Outputs merged prompt plus image tensor for downstream WAN/i2v pipelines.
+  - Outputs text list plus image tensor for downstream WAN/i2v pipelines.
 - `GX10ImageUpload`
   - Callback output node for image artifacts.
-  - Sends callback payload to the `callback_url` injected by GX10 orchestrator.
+  - Inputs are `images`, `run_id`, `callback_url`, `auth_header`.
+  - Sends callback payload (`run_id`, `format`, `index`, `image_b64`) only.
   - Supports single image and multi-image payloads.
 - `GX10SaveImage`
   - Save-image style callback node.
@@ -59,7 +57,7 @@ How to install into ComfyUI
 
 Required input keys match orchestrator injection:
 - `GX10TextInput` path: `texts`, `run_id`, `callback_url`
-- `GX10ImageInput` path: `prompt` / `text` / `texts`, `first_frame_image` / `image_path`, `run_id`, `callback_url`
+- `GX10ImageInput` path: `texts`, `first_frame_image` / `image_path`, `run_id`, `callback_url`
 - `first_frame_image` / `image_path` (for `GX10ImageInput`)
 - `image` (optional for `GX10ImageInput`, fallback when no image path)
 - `run_id`, `callback_url`

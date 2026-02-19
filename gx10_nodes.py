@@ -47,21 +47,6 @@ def _coerce_text_list(value: object) -> List[str]:
     return [chunk.strip() for chunk in text.split(",") if chunk.strip()]
 
 
-def _normalize_metadata(value: object) -> Dict:
-    if isinstance(value, dict):
-        return value
-    if isinstance(value, str):
-        value = value.strip()
-        if not value:
-            return {}
-        try:
-            parsed = json.loads(value)
-        except Exception:
-            return {}
-        return parsed if isinstance(parsed, dict) else {}
-    return {}
-
-
 def _coerce_images(images: Sequence[object]) -> List[torch.Tensor]:
     tensor_images: List[torch.Tensor] = []
     for image in images:
@@ -128,20 +113,8 @@ class GX10TextInput:
             }
         }
 
-    RETURN_TYPES = (
-        "STRING",
-        "STRING",
-        "STRING",
-        "STRING",
-        "STRING",
-    )
-    RETURN_NAMES = (
-        "prompt",
-        "text",
-        "texts",
-        "run_id",
-        "callback_url",
-    )
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("texts",)
     FUNCTION = "pack"
     OUTPUT_NODE = False
     CATEGORY = "GX10"
@@ -151,15 +124,11 @@ class GX10TextInput:
         texts: str,
         run_id: str,
         callback_url: str,
-    ) -> Tuple[str, str, str, str, str]:
-        merged_prompt, merged_text, merged_texts = _normalize_text_inputs(texts=texts)
-        return (
-            merged_prompt,
-            merged_text,
-            merged_texts,
-            str(run_id),
-            str(callback_url),
-        )
+    ) -> Tuple[str]:
+        del run_id
+        del callback_url
+        _, _, merged_texts = _normalize_text_inputs(texts=texts)
+        return (merged_texts,)
 
 
 class GX10ImageInput:
@@ -167,14 +136,10 @@ class GX10ImageInput:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "prompt": ("STRING", {"multiline": True, "default": ""}),
-                "text": ("STRING", {"multiline": True, "default": ""}),
                 "texts": ("STRING", {"multiline": True, "default": ""}),
                 "first_frame_image": ("STRING", {"default": "", "multiline": False}),
                 "image_path": ("STRING", {"default": "", "multiline": False}),
                 "run_id": ("STRING", {"default": "", "multiline": False}),
-                "metadata_json": ("STRING", {"multiline": True, "default": "{}"}),
-                "mode": ("STRING", {"default": "i2v", "multiline": False}),
                 "callback_url": ("STRING", {"default": "", "multiline": False}),
             },
             "optional": {
@@ -182,30 +147,24 @@ class GX10ImageInput:
             }
         }
 
-    RETURN_TYPES = ("STRING", "STRING", "STRING", "IMAGE")
-    RETURN_NAMES = ("prompt", "text", "texts", "image")
+    RETURN_TYPES = ("STRING", "IMAGE")
+    RETURN_NAMES = ("texts", "image")
     FUNCTION = "pack"
     OUTPUT_NODE = False
     CATEGORY = "GX10"
 
     def pack(
         self,
-        prompt: str,
-        text: str,
         texts: str,
         first_frame_image: str,
         image: Optional[torch.Tensor],
         image_path: str,
         run_id: str,
-        metadata_json: str,
-        mode: str,
         callback_url: str,
-    ) -> Tuple[str, str, str, torch.Tensor]:
-        merged_prompt, merged_text, merged_texts = _normalize_text_inputs(prompt, text, texts)
+    ) -> Tuple[str, torch.Tensor]:
         del run_id
-        del metadata_json
-        del mode
         del callback_url
+        _, _, merged_texts = _normalize_text_inputs(texts=texts)
 
         image_candidates = [image_path, first_frame_image]
         output_image: torch.Tensor | None = None
@@ -222,12 +181,7 @@ class GX10ImageInput:
         if output_image is None:
             output_image = torch.zeros((1, 1, 1, 3), dtype=torch.float32)
 
-        return (
-            merged_prompt,
-            merged_text,
-            merged_texts,
-            output_image,
-        )
+        return (merged_texts, output_image)
 
 
 class GX10ImageUpload:
@@ -238,8 +192,6 @@ class GX10ImageUpload:
                 "images": ("IMAGE",),
                 "run_id": ("STRING", {"default": "", "multiline": False}),
                 "callback_url": ("STRING", {"default": "", "multiline": False}),
-                "metadata_json": ("STRING", {"multiline": True, "default": "{}"}),
-                "mode": ("STRING", {"default": "t2i", "multiline": False}),
                 "auth_header": ("STRING", {"default": "", "multiline": False}),
             }
         }
@@ -255,14 +207,10 @@ class GX10ImageUpload:
         images: torch.Tensor,
         run_id: str,
         callback_url: str,
-        metadata_json: str,
-        mode: str = "t2i",
         auth_header: str = "",
     ) -> Tuple[str]:
         run_id = str(run_id).strip()
         callback_url = str(callback_url).strip()
-        metadata = _normalize_metadata(metadata_json)
-        metadata.setdefault("mode", str(mode))
 
         if not callback_url:
             status = "skip"
@@ -280,8 +228,6 @@ class GX10ImageUpload:
                     "image_b64": _encode_image_to_png_b64(image),
                     "format": "png",
                     "index": index,
-                    "metadata": metadata,
-                    "signature": None,
                 }
             )
 
@@ -291,8 +237,6 @@ class GX10ImageUpload:
                 format=encoded[0]["format"],
                 index=encoded[0]["index"],
                 image_b64=encoded[0]["image_b64"],
-                metadata=encoded[0]["metadata"],
-                signature=encoded[0]["signature"],
             )
         else:
             payload = {
@@ -303,12 +247,9 @@ class GX10ImageUpload:
                         "format": item["format"],
                         "index": item["index"],
                         "image_b64": item["image_b64"],
-                        "metadata": item["metadata"],
-                        "signature": item["signature"],
                     }
                     for item in encoded
                 ],
-                "metadata": metadata,
             }
 
         req = urllib.request.Request(
@@ -381,7 +322,6 @@ class GX10SaveImage:
     ) -> Dict[str, object]:
         run_id = str(run_id).strip()
         callback_url = str(callback_url).strip()
-        metadata = {}
 
         if not callback_url:
             return {"ui": {"images": []}}
@@ -396,8 +336,6 @@ class GX10SaveImage:
                 "format": "png",
                 "index": index,
                 "image_b64": _encode_image_to_png_b64(image),
-                "metadata": metadata,
-                "signature": None,
             }
             for index, image in enumerate(image_list)
         ]
@@ -409,15 +347,11 @@ class GX10SaveImage:
                 "format": first["format"],
                 "index": first["index"],
                 "image_b64": first["image_b64"],
-                "metadata": first["metadata"],
-                "signature": first["signature"],
             }
         else:
             payload = {
                 "run_id": run_id,
                 "images": images_payload,
-                "metadata": metadata,
-                "signature": None,
             }
 
         detail = _post_callback(callback_url, payload, auth_header=auth_header)
